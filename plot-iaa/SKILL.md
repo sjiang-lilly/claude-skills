@@ -1,5 +1,12 @@
 # Plot IAA/Receptor Bar Chart
 
+## Author
+
+**Author:** Mandy Jiang
+**Contact:** shan.jiang2@lilly.com
+**Organization:** Eli Lilly and Company - Bioinformatics
+**Version:** 1.0.0
+
 ## Description
 Generate a horizontal bar plot with a broken x-axis showing IAA/Receptor values by gene (TAA). The plot uses a blue-to-red color gradient based on values.
 
