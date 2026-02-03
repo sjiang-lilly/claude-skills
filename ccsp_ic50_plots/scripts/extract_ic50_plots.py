@@ -118,7 +118,7 @@ def _extract_compound_id(cell_value):
     """Extract compound ID from cell value.
 
     Handles formats:
-        - COMPOUND_CELLLINE → COMPOUND (e.g., TA164_LS180 → TA164)
+        - CELLLINE_COMPOUND → COMPOUND (e.g., BT20_TA145 → TA145)
         - COMPOUND → COMPOUND
     """
     if not cell_value or not isinstance(cell_value, str):
@@ -127,8 +127,8 @@ def _extract_compound_id(cell_value):
     cell_value = cell_value.strip()
     if '_' in cell_value:
         parts = cell_value.split('_')
-        # Return first part (compound ID), not the cell line suffix
-        return parts[0] if len(parts) >= 2 else cell_value
+        # Return second part (compound ID), not the cell line prefix
+        return parts[1] if len(parts) >= 2 else cell_value
     return cell_value
 
 
@@ -290,50 +290,64 @@ def generate_html(cell_compound_plots, output_path, compounds, compound_names=No
         f.write(html_content)
 
 
-def find_excel_folder(input_path):
-    """Find the folder containing Excel files, handling zip extraction if needed.
-    
+def find_all_excel_files(input_path):
+    """Find all Excel files from input path, handling zip extraction and multiple subfolders.
+
     Args:
         input_path: Path to zip file or folder
-    
+
     Returns:
-        tuple: (excel_folder_path, temp_dir_to_cleanup_or_None)
+        tuple: (list of (excel_file_path, cell_line) tuples, temp_dir_to_cleanup_or_None)
     """
+    excel_files_found = []
+
+    def is_ccsp_file(filename):
+        """Check if file matches CCSP pattern: *_paste.xlsx"""
+        return (filename.endswith('_paste.xlsx') and
+                not filename.startswith('~') and
+                'Summary' not in filename)
+
     # If it's a zip file, extract it
     if input_path.endswith('.zip') and os.path.isfile(input_path):
         temp_dir = tempfile.mkdtemp(prefix='ccsp_extract_')
         print(f"Extracting zip file to temporary directory...")
         with zipfile.ZipFile(input_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
-        
-        # Find the folder with Excel files (may be nested)
+
+        # Find all Excel files (may be nested in subfolders)
         for root, dirs, files in os.walk(temp_dir):
             # Skip __MACOSX folders
             if '__MACOSX' in root:
                 continue
-            excel_files = [f for f in files if f.endswith('.xlsx') and not f.startswith('~')]
-            if excel_files:
-                return root, temp_dir
-        
-        return temp_dir, temp_dir
-    
-    # If it's a directory, use it directly
+            for f in files:
+                if is_ccsp_file(f):
+                    file_path = os.path.join(root, f)
+                    cell_line = get_cell_line(f)
+                    excel_files_found.append((file_path, cell_line))
+
+        return excel_files_found, temp_dir
+
+    # If it's a directory, search it and all subfolders
     elif os.path.isdir(input_path):
-        # Check if Excel files are directly in this folder
-        excel_files = [f for f in os.listdir(input_path) if f.endswith('.xlsx') and not f.startswith('~')]
-        if excel_files:
-            return input_path, None
-        
-        # Check subfolders
+        # Check files directly in this folder
+        for f in os.listdir(input_path):
+            file_path = os.path.join(input_path, f)
+            if os.path.isfile(file_path) and is_ccsp_file(f):
+                cell_line = get_cell_line(f)
+                excel_files_found.append((file_path, cell_line))
+
+        # Check all subfolders
         for item in os.listdir(input_path):
             subfolder = os.path.join(input_path, item)
-            if os.path.isdir(subfolder) and not item.startswith('__'):
-                excel_files = [f for f in os.listdir(subfolder) if f.endswith('.xlsx') and not f.startswith('~')]
-                if excel_files:
-                    return subfolder, None
-        
-        return input_path, None
-    
+            if os.path.isdir(subfolder) and not item.startswith('__') and not item.startswith('.'):
+                for f in os.listdir(subfolder):
+                    file_path = os.path.join(subfolder, f)
+                    if os.path.isfile(file_path) and is_ccsp_file(f):
+                        cell_line = get_cell_line(f)
+                        excel_files_found.append((file_path, cell_line))
+
+        return excel_files_found, None
+
     else:
         print(f"Error: Input path '{input_path}' is not a valid zip file or directory", file=sys.stderr)
         sys.exit(1)
@@ -370,62 +384,58 @@ Examples:
             cell_colors = json.load(f)
         print(f"Loaded cell color mapping: {len(cell_colors)} entries")
     
-    # Find Excel files folder (handles zip extraction)
-    input_folder, temp_extract_dir = find_excel_folder(args.input)
-    
+    # Find all Excel files (handles zip extraction and multiple subfolders)
+    excel_files, temp_extract_dir = find_all_excel_files(args.input)
+
     try:
-        # Find Excel files (exclude Summary and temp files)
-        excel_files = [f for f in os.listdir(input_folder) 
-                       if f.endswith('.xlsx') and 'Summary' not in f and not f.startswith('~')]
-        
         if not excel_files:
             print("Error: No CCSP Excel files found", file=sys.stderr)
             sys.exit(1)
-        
+
+        # Sort by cell line name
+        excel_files = sorted(excel_files, key=lambda x: x[1])
+
         print(f"Found {len(excel_files)} cell line files")
-        
+
         # Extract test compounds from first file (excludes Staurosporine)
-        first_file = os.path.join(input_folder, sorted(excel_files)[0])
+        first_file = excel_files[0][0]
         compounds = extract_compounds_from_excel(first_file)
-        
+
         if not compounds:
             print("Error: Could not extract compound list from Excel files", file=sys.stderr)
             sys.exit(1)
-        
+
         print(f"Found {len(compounds)} test compounds: {', '.join(compounds)}")
         print(f"(Staurosporine excluded)")
-        
+
         # Create temp directory for images
         temp_images_dir = os.path.join(os.path.dirname(args.output_html) or '.', '.ic50_plots_temp')
         os.makedirs(temp_images_dir, exist_ok=True)
-        
+
         # Process each Excel file
         cell_compound_plots = {}
-        
-        for excel_file in sorted(excel_files):
-            cell_line = get_cell_line(excel_file)
+
+        for file_path, cell_line in excel_files:
             print(f"Processing {cell_line}...")
-            
-            file_path = os.path.join(input_folder, excel_file)
-            
+
             # Extract only % Inhibition plots for test compounds
             converted = extract_and_convert_images(file_path, temp_images_dir, cell_line, len(compounds))
-            
+
             if converted:
                 cell_dir = os.path.join(temp_images_dir, cell_line)
-                
+
                 # Sort converted images by number
                 def get_num(fname):
                     match = re.search(r'image(\d+)\.png', fname)
                     return int(match.group(1)) if match else 0
                 converted_sorted = sorted(converted, key=get_num)
-                
+
                 # Map images to compounds (1:1 mapping in order)
                 cell_compound_plots[cell_line] = {}
                 for i, img in enumerate(converted_sorted):
                     if i < len(compounds):
                         cell_compound_plots[cell_line][compounds[i]] = os.path.join(cell_dir, img)
-                
+
                 print(f"  Extracted {len(converted_sorted)} % Inhibition plots")
         
         # Generate HTML output
